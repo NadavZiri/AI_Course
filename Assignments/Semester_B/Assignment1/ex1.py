@@ -41,12 +41,22 @@ class ElevatorsProblem(search.Problem):
         enter = []
         exit = []
 
+        loaded_elev_goals = {}  # eid -> set of passenger goal floors (only when all goals are reachable)
+        for eid, floor in elev_state:
+            if passengers[eid]:
+                pax_goals = {self.goals[pid] for pid, _, elevator_id in person_state if elevator_id == eid}
+                if all(g in self.allowed[eid] for g in pax_goals):
+                    loaded_elev_goals[eid] = pax_goals
+
         for eid, floor in elev_state:
             for allowed_floor in self.allowed[eid]:
                 if allowed_floor == floor:
                     continue
                 # prune: empty elevator moving to a floor with no one waiting is useless
                 if not passengers[eid] and allowed_floor not in waiting_floors:
+                    continue
+                # prune: loaded elevator (all goals reachable) only goes to passenger goals or waiting floors
+                if eid in loaded_elev_goals and allowed_floor not in loaded_elev_goals[eid] and allowed_floor not in waiting_floors:
                     continue
                 new_elev_state = tuple((e, floor if e != eid else allowed_floor) for e, floor in elev_state)
                 new_person_state = tuple((pid, allowed_floor if elevator_id == eid else p_floor, elevator_id) for pid, p_floor, elevator_id in person_state)
@@ -107,9 +117,14 @@ class ElevatorsProblem(search.Problem):
 
         for (floor, goal), count in not_in_elev.items():
             if any(floor in self.allowed[e] and goal in self.allowed[e] for e in self.allowed):
-                total += count * 2 + 1  # ENTER each + 1 shared MOVE + EXIT each
+                elev_at_pickup = any(
+                    e_floor == floor
+                    for e, e_floor in elev_state
+                    if floor in self.allowed[e] and goal in self.allowed[e]
+                )
+                total += count * 2 + (1 if elev_at_pickup else 2)
             else:
-                total += count * 4 + 1  # ENTER each + EXIT each + ENTER each + 1 shared MOVE + EXIT each
+                total += count * 4 + 2  # ENTER each + EXIT each + ENTER each + 2 shared MOVEs + EXIT each
 
         return total
 
