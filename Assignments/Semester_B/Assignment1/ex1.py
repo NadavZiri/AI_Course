@@ -1,3 +1,4 @@
+# Used Gemini and Claude to help discuss heuristic and pruning strategies and implementation in python
 import ex1_check
 import search as search
 import utils as utils
