@@ -180,15 +180,8 @@ class ElevatorsProblem(search.Problem):
 
     def h_astar(self, node):
         """ This is the heuristic. It gets a node (not a state)
-        and returns a goal distance estimate.
-
-        Per-person ENTER/EXIT lower bound: a person who must board k elevators incurs
-        exactly k ENTERs + k EXITs, none of which are shared between people, so summing
-        is admissible. The estimate is also *consistent*: it is floor-independent for a
-        passenger inside an elevator (via _elev_dist), so MOVE actions never drop it, and
-        each ENTER/EXIT lowers it by at most the action's unit cost. Shared MOVE cost is
-        deliberately omitted -- counting it per person would break both admissibility and
-        consistency, and the move-pruning in successor recovers the lost speed instead."""
+        and returns a goal distance estimate."""
+        
         _, person_state = node.state
         total = 0
         for pid, floor, eid in person_state:
