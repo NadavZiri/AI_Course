@@ -189,11 +189,17 @@ class ElevatorsProblem(search.Problem):
             goal = self.goals[pid]
             if eid == -1:
                 if floor != goal:
-                    total += 2 * self._dist(floor, goal)        # ENTER + EXIT per boarded elevator
+                    d = self._dist(floor, goal)
+                    if d is None:
+                        return float('inf')
+                    total += 2 * d                               # ENTER + EXIT per boarded elevator
             elif goal in self.allowed[eid]:
                 total += 1                                       # ride to goal, then EXIT
             else:
-                total += 1 + 2 * self._elev_dist(eid, goal)      # EXIT here + board the remaining chain
+                ed = self._elev_dist(eid, goal)
+                if ed is None:
+                    return float('inf')
+                total += 1 + 2 * ed                              # EXIT here + board the remaining chain
         return total
 
 
