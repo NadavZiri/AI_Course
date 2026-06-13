@@ -63,55 +63,97 @@ class Controller:
                             cost += 1.5  # Soften this from 4.0/6.0 to 1.5
                         if cost < self.min_time[i][j]:
                             self.min_time[i][j] = cost
-                    
-    
+
+
     def get_legal_actions(self, state):
         elevators_t, persons_t, _ = state
         actions = []
-        
+
         # 1. The Greedy Farmer Fix
-        # Only allow RESET if the environment heavily incentivizes farming single people
         if self.expected_rewards:
             max_reward = max(self.expected_rewards.values())
             if max_reward > self.game.get_goal_reward():
                 actions.append("RESET")
         else:
-            actions.append("RESET") # Fallback
-            
+            actions.append("RESET")
+
         elev_info = {eid: {'floor': f, 'weight': w} for eid, f, w in elevators_t}
-        
-        # 2. Generate MOVEs
+
+        # 2. Compute useful target floors per elevator (pruning MOVE actions)
+        # Only move to floors where a person waits, needs delivery, or needs a transfer.
+        useful_targets = {eid: set() for eid in elev_info}
+
+        for pid, loc in persons_t:
+            p_goal = self.game.get_person_goal(pid)
+            person_weight = self.game.get_person_weight(pid)
+
+            if loc[0] == 'floor':
+                p_floor = loc[1]
+                for eid, info in elev_info.items():
+                    if (p_floor in self.reachable[eid] and
+                            info['weight'] + person_weight <= self.capacities[eid]):
+                        current_dist = self.min_time[p_floor].get(p_goal, float('inf'))
+                        if any(self.min_time[f].get(p_goal, float('inf')) < current_dist
+                               for f in self.reachable[eid]):
+                            useful_targets[eid].add(p_floor)
+
+            elif loc[0] == 'in':
+                eid_in = loc[1]
+                if p_goal in self.reachable[eid_in]:
+                    useful_targets[eid_in].add(p_goal)
+                    # Pre-position a MORE-reliable elevator at the current floor for a possible switch.
+                    # Never send a broken elevator to shadow a reliable one — it wastes search budget.
+                    e_floor_in = elev_info[eid_in]['floor']
+                    for eid2, info2 in elev_info.items():
+                        if (eid2 != eid_in
+                                and e_floor_in in self.reachable[eid2]
+                                and p_goal in self.reachable[eid2]
+                                and info2['weight'] + person_weight <= self.capacities[eid2]
+                                and self.elevator_action_prob[eid2] >= self.elevator_action_prob[eid_in]):
+                            useful_targets[eid2].add(e_floor_in)
+                else:
+                    # Find the best transfer floor(s) reachable by this elevator
+                    best_time = min(
+                        (self.min_time[f].get(p_goal, float('inf')) for f in self.reachable[eid_in]),
+                        default=float('inf')
+                    )
+                    if best_time < float('inf'):
+                        transfer_floors = {
+                            f for f in self.reachable[eid_in]
+                            if self.min_time[f].get(p_goal, float('inf')) == best_time
+                        }
+                        useful_targets[eid_in].update(transfer_floors)
+                        # Pre-position other elevators at the transfer floor
+                        for t_floor in transfer_floors:
+                            for eid2, info2 in elev_info.items():
+                                if eid2 != eid_in and t_floor in self.reachable[eid2]:
+                                    if info2['weight'] + person_weight <= self.capacities[eid2]:
+                                        useful_targets[eid2].add(t_floor)
+
+        # 3. Generate MOVEs to useful floors only
         for eid, info in elev_info.items():
             current_floor = info['floor']
-            for target_floor in self.reachable[eid]:
+            for target_floor in useful_targets[eid]:
                 if target_floor != current_floor:
                     actions.append(f"MOVE{{{eid},{target_floor}}}")
-        
-        # 3. Generate ENTERs and EXITs (Fix 1 Applied Here)
+
+        # 4. Generate ENTERs and EXITs
         for pid, loc in persons_t:
             person_weight = self.game.get_person_weight(pid)
+            p_goal = self.game.get_person_goal(pid)
+
             if loc[0] == 'floor':
                 for eid, info in elev_info.items():
                     if info['floor'] == loc[1] and info['weight'] + person_weight <= self.capacities[eid]:
-                        
-                        # --- START OF FIX 1: Strict Progress Enforcement ---
-                        p_goal = self.game.get_person_goal(pid)
                         current_dist = self.min_time[loc[1]].get(p_goal, float('inf'))
-                        can_progress = False
-                        
-                        for reachable_f in self.reachable[eid]:
-                            if self.min_time[reachable_f].get(p_goal, float('inf')) < current_dist:
-                                can_progress = True
-                                break
-                                
-                        if can_progress:
+                        if any(self.min_time[f].get(p_goal, float('inf')) < current_dist
+                               for f in self.reachable[eid]):
                             actions.append(f"ENTER{{{pid},{eid}}}")
-                        # --- END OF FIX 1 ---
-                        
+
             elif loc[0] == 'in':
                 actions.append(f"EXIT{{{pid},{loc[1]}}}")
-                
-        # 4. Deadlock fallback
+
+        # 5. Deadlock fallback
         if not actions:
             actions.append("RESET")
             
@@ -240,11 +282,11 @@ class Controller:
     
     def get_cost_on_floor(self, p_floor, p_goal, elev_floors, p_action_prob):
         best_cost = float('inf')
-        
+
         for eid, e_floor in elev_floors.items():
             if p_floor in self.reachable[eid]:
                 arrive = 0.0 if e_floor == p_floor else (1.0 / self.elevator_action_prob[eid])
-                
+
                 if p_goal in self.reachable[eid]:
                     travel = 0.0 if p_floor == p_goal else (1.0 / self.elevator_action_prob[eid])
                     cost = arrive + travel
@@ -253,16 +295,15 @@ class Controller:
                     for f in self.reachable[eid]:
                         dist_f = 0.0 if f == p_floor else (1.0 / self.elevator_action_prob[eid])
                         future = self.min_time[f].get(p_goal, float('inf'))
-                        
-                        # Fix: Perfectly matched the 1.5 FW transfer logic
+
                         if dist_f + future + 1.5 < best_drop:
                             best_drop = dist_f + future + 1.5
-                            
+
                     cost = arrive + best_drop
-                    
+
                 if cost < best_cost:
                     best_cost = cost
-                    
+
         return best_cost + (2.0 / p_action_prob)
 
     def evaluate_heuristic(self, state):
@@ -273,25 +314,24 @@ class Controller:
         total_value = 0.0
         elev_floors = {eid: f for eid, f, w in elevators_t}
 
-        # THE DYNAMIC GOAL SLICE
-        # Actively pulls the AI toward clearing the board without artificial greedy cliffs.
         goal_slice = self.game.get_goal_reward() / total_remaining
 
         for pid, loc in persons_t:
-            # Add the dynamically growing slice to their base reward
             expected_reward = self.expected_rewards[pid] + goal_slice
             p_action_prob = self.person_action_prob[pid]
             p_goal = self.game.get_person_goal(pid)
-            
+
             expected_time = float('inf')
-            
+
             if loc[0] == 'floor':
-                expected_time = self.get_cost_on_floor(loc[1], p_goal, elev_floors, p_action_prob)
-                
+                expected_time = self.get_cost_on_floor(
+                    loc[1], p_goal, elev_floors, p_action_prob
+                )
+
             elif loc[0] == 'in':
                 eid = loc[1]
                 e_floor = elev_floors[eid]
-                
+
                 if p_goal in self.reachable[eid]:
                     travel = 0.0 if e_floor == p_goal else (1.0 / self.elevator_action_prob[eid])
                     exit_cost = 1.0 / p_action_prob
@@ -300,17 +340,17 @@ class Controller:
                     best_transfer_time = float('inf')
                     for f in self.reachable[eid]:
                         drop_time = (0.0 if e_floor == f else (1.0 / self.elevator_action_prob[eid])) + (1.0 / p_action_prob)
-                        future_time = self.get_cost_on_floor(f, p_goal, elev_floors, p_action_prob)
-                        
+                        future_time = self.get_cost_on_floor(
+                            f, p_goal, elev_floors, p_action_prob
+                        )
                         if drop_time + future_time < best_transfer_time:
                             best_transfer_time = drop_time + future_time
-                            
                     expected_time = best_transfer_time
 
             if expected_time != float('inf'):
                 discounted_reward = expected_reward * (0.99 ** expected_time)
                 total_value += discounted_reward
-                
+
         return total_value
     
     
@@ -348,43 +388,60 @@ class Controller:
 
     def choose_next_action(self, state):
         start_time = time.time()
-        time_budget = 0.55 # Safe limit per step (engine allows ~0.5s)
-        
+        time_budget = 0.55  # Safe limit per step (engine allows ~0.5s)
+
         legal_actions = self.get_legal_actions(state)
         if not legal_actions:
             return "RESET"
         if len(legal_actions) == 1:
             return legal_actions[0] # Don't waste time thinking if forced
-            
+
         best_action = "RESET"
-        
+
         # Clear the cache for the new turn to avoid memory leaks
-        self.memo = {} 
-        
+        self.memo = {}
+
+        # Tiebreaker lookups: goal-floor EXIT and empty-reliable-elev ENTER
+        elevators_t, _, _ = state
+        elev_floors = {eid: f for eid, f, _ in elevators_t}
+        elev_weights = {eid: w for eid, _, w in elevators_t}
+
         depth = 1
         while True:
             current_best_action = None
             current_best_value = float('-inf')
-            
+
             for action in legal_actions:
                 # Emergency Stop: If we exceed budget, return the best action from the LAST depth
                 if time.time() - start_time > time_budget:
                     return best_action if best_action != "RESET" else legal_actions[0]
-                    
+
                 expected_utility = 0
                 for prob, next_state, reward in self.get_transitions(state, action):
                     # Added the 0.99 multiplier
                     expected_utility += prob * (reward + 0.99 * self.expectimax(next_state, depth - 1))
-                    
+
+                # Tiebreaker: prefer goal-floor exits and first boarding into empty reliable elevators.
+                # These bonuses are small enough to flip only near-ties, fixing routing order issues
+                # without overriding clear search preferences.
+                if action.startswith('EXIT{'):
+                    pid, eid = map(int, action[5:-1].split(','))
+                    if elev_floors.get(eid) == self.game.get_person_goal(pid):
+                        expected_utility += 0.02  # delivering at goal – always prefer
+                elif action.startswith('ENTER{'):
+                    pid, eid = map(int, action[6:-1].split(','))
+                    if (self.elevator_action_prob[eid] >= 0.7 and elev_weights.get(eid, 0) == 0):
+                        expected_utility += 0.006  # board empty reliable elevator first
+
                 if expected_utility > current_best_value:
                     current_best_value = expected_utility
                     current_best_action = action
-            
+
             # Successfully completed this depth layer
             best_action = current_best_action
             depth += 1
-            
-            # Hard cap at depth 3 to prevent extreme memory usage
+
             if depth > 4:
                 break
+
         return best_action
