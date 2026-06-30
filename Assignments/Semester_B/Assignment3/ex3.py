@@ -388,19 +388,7 @@ class Controller:
             transitions.append((prob_success, success_state, 0.0))
 
             if prob_success < 1.0:
-                reachable      = set(self.reachable[e])
-                failure_floors = (reachable - {target_f}) | {current_floor}
-
-                if failure_floors:
-                    prob_per_failure = (1.0 - prob_success) / len(failure_floors)
-                    for fail_f in failure_floors:
-                        new_elevs_fail = list(elevators_t)
-                        for i, (eid, f, w) in enumerate(new_elevs_fail):
-                            if eid == e:
-                                new_elevs_fail[i] = (eid, fail_f, w)
-                                break
-                        fail_state = (tuple(new_elevs_fail), persons_t, total_persons_remaining)
-                        transitions.append((prob_per_failure, fail_state, 0.0))
+                transitions.append((1.0 - prob_success, state, 0.0))
 
         return transitions
 
@@ -575,7 +563,7 @@ class Controller:
             best_action = current_best_action
             depth += 1
 
-            if depth > 4:
+            if depth > 8:
                 break
 
         self._save_prev(state, best_action)
