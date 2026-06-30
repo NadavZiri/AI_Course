@@ -69,6 +69,10 @@ class Controller:
         self._rebuild_floyd_warshall()
         self.fw_last_rebuilt = 0
 
+        # Whether reset-farming a single person beats completing full cycles.
+        # Recomputed alongside Floyd-Warshall as reward estimates improve.
+        self.allow_reset = self._reset_beneficial()
+
         # Memoization cache (cleared every step)
         self.memo = {}
 
@@ -150,6 +154,49 @@ class Controller:
                             self.min_time[i][j] = cost
 
     # =========================================================================
+    # RESET-FARMING GATE
+    # =========================================================================
+
+    def _reset_beneficial(self):
+        """Decide whether reset-farming a single person beats full delivery.
+
+        Reset-farming pays off only on "reset-friendly" layouts where one cheap,
+        high-reward person can be delivered repeatedly (deliver -> RESET -> repeat)
+        for a higher per-step reward than completing the whole delivery cycle
+        (which additionally earns goal_reward). We compare the best single-person
+        farm rate against the full-cycle completion rate, both estimated from the
+        initial state using current learned reward/probability estimates.
+
+        When farming does NOT win we suppress RESET entirely (see
+        get_legal_actions), which stops the planner from wastefully looping on a
+        cheap person instead of finishing deliveries.
+        """
+        init_elevs, init_persons, _ = self.game.get_initial_state()
+        elev_floors = {eid: f for eid, f, w in init_elevs}
+
+        best_farm_rate = 0.0
+        cycle_reward   = self.goal_reward
+        cycle_time     = 0.0
+
+        for pid, loc in init_persons:
+            p_goal  = self.person_goal[pid]
+            p_prob  = self._get_person_prob(pid)
+            p_floor = loc[1] if loc[0] == 'floor' else elev_floors.get(loc[1])
+            t = self.get_cost_on_floor(p_floor, p_goal, elev_floors, p_prob)
+            if t == float('inf'):
+                continue
+            r = self._get_person_reward_estimate(pid)
+            cycle_reward += r
+            cycle_time   += t
+            farm_rate = r / (t + 1.0)   # +1 step for the RESET action
+            if farm_rate > best_farm_rate:
+                best_farm_rate = farm_rate
+
+        if cycle_time <= 0:
+            return True
+        return best_farm_rate > (cycle_reward / cycle_time)
+
+    # =========================================================================
     # ONLINE LEARNING UPDATE
     # =========================================================================
 
@@ -224,7 +271,9 @@ class Controller:
 
     def get_legal_actions(self, state):
         elevators_t, persons_t, _ = state
-        actions = ["RESET"]   # RESET is always legal; planner decides its value
+        # RESET only offered when reset-farming actually beats full delivery;
+        # otherwise it is suppressed so the planner commits to completing cycles.
+        actions = ["RESET"] if self.allow_reset else []
 
         elev_info = {eid: {'floor': f, 'weight': w} for eid, f, w in elevators_t}
         useful_targets = {eid: set() for eid in elev_info}
@@ -510,6 +559,7 @@ class Controller:
         if self.t == 1 or (self.t - self.fw_last_rebuilt) >= 15:
             self._rebuild_floyd_warshall()
             self.fw_last_rebuilt = self.t
+            self.allow_reset = self._reset_beneficial()
 
         # 4. Clear memoization cache (estimates changed since last step)
         self.memo = {}
